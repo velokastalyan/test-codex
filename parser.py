@@ -33,6 +33,7 @@ def parse_product_card(card):
 def parse_page(url):
     print(f"Парсинг страницы: {url}")
     res = requests.get(url, headers=headers)
+print(f"Статус ответа: {res.status_code}")
     res.raise_for_status()
     
     # ⬇⬇⬇ Сохраняем HTML для отладки ⬇⬇⬇
