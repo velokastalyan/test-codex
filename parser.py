@@ -3,11 +3,11 @@
 """
 Парсер каталога https://sprint-rowery.pl/rowery
 Собирает: category, title, price, link
-Сохраняет в sprint_rowery.csv  +  sprint_rowery.xlsx
+Сохраняет в sprint_rowery.csv + sprint_rowery.xlsx
 
 Запуск:
     python parser.py
-Остановить в любой момент: Ctrl+C  –  скрипт сохранит то, что уже собрано.
+Остановить в любой момент: Ctrl+C — скрипт сохранит то, что уже собрано.
 """
 
 import time
@@ -18,16 +18,15 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-# ───── настройки ─────
+# ─── настройки ───
 BASE_URL    = "https://sprint-rowery.pl/rowery?product_list_limit=60"
 HEADERS     = {"User-Agent": "Mozilla/5.0"}
-MAX_WORKERS = 64            # потоков на карточки товара
+MAX_WORKERS = 64        # потоков на карточки
 TIMEOUT     = 20
-# ─────────────────────
+# ─────────────────
 
 
 def get_soup(url: str) -> BeautifulSoup:
-    """Запрашиваем страницу и возвращаем объект BeautifulSoup."""
     r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
     r.raise_for_status()
     return BeautifulSoup(r.text, "html.parser")
@@ -55,7 +54,6 @@ def fetch_category(url: str) -> str:
     except Exception:
         return ""
     crumbs = soup.select("ol.breadcrumbs li a")
-    # пропустим «Start» и сам товар (последний элемент)
     return " > ".join(c.get_text(strip=True) for c in crumbs[1:-1]) if crumbs else ""
 
 
@@ -64,7 +62,6 @@ def parse_page(url: str) -> tuple[list[dict], str | None]:
     print(f"→ {url}")
     soup = get_soup(url)
 
-    # плитки товаров
     items = [parse_tile(t, url) for t in soup.select("div.product-item-info")]
 
     # подтягиваем категории параллельно
@@ -74,7 +71,6 @@ def parse_page(url: str) -> tuple[list[dict], str | None]:
         for fut in as_completed(fut2idx):
             items[fut2idx[fut]]["category"] = fut.result()
 
-    # ссылка «Дальше»
     nxt = soup.select_one("li.pages-item-next > a, a.action.next")
     next_url = urljoin(url, nxt["href"]) if nxt and nxt.has_attr("href") else None
     return items, next_url
@@ -89,20 +85,20 @@ def crawl(start_url: str) -> list[dict]:
     return all_items
 
 
-# ---------- save ----------
+# ---------- сохранение ----------
 def save(data: list[dict]):
     df = pd.DataFrame(data)
     df.to_csv("sprint_rowery.csv", sep=";", index=False, encoding="utf-8-sig")
     df.to_excel("sprint_rowery.xlsx", index=False)
 
 
-# ---------- запускаем ----------
+# ---------- точка входа ----------
 if __name__ == "__main__":
     t0 = time.time()
     collected: list[dict] = []
 
     try:
-        collected = crawl(BASE_URL)            # основной обход
+        collected = crawl(BASE_URL)
     except KeyboardInterrupt:
         print("\n⏹  Остановлено вручную — сохраняю то, что успел собрать…")
     finally:
@@ -111,5 +107,4 @@ if __name__ == "__main__":
             print(f"💾 Сохранено {len(collected)} товаров.")
         else:
             print("⚠️  Нечего сохранять — список пуст.")
-
-        print(f"⏱  Время работы: {time.time() - t0:.1f} сек.")
+        print(f"⏱  Время работы: {time.time() - t0:.1f} сек.")
