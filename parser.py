@@ -1,10 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Парсер https://sprint-rowery.pl/rowery
-Сохраняет: category, title, price, link → sprint_rowery.{csv,xlsx}
+Парсер каталога https://sprint-rowery.pl/rowery
+Собирает: category, title, price, link
+Сохраняет в sprint_rowery.csv  +  sprint_rowery.xlsx
 
-Запуск: python parser.py
+Запуск:
+    python parser.py
+Остановить в любой момент: Ctrl+C  –  скрипт сохранит то, что уже собрано.
 """
 
 import time
@@ -16,14 +19,15 @@ import requests
 from bs4 import BeautifulSoup
 
 # ───── настройки ─────
-BASE_URL = "https://sprint-rowery.pl/rowery?product_list_limit=60"
-HEADERS = {"User-Agent": "Mozilla/5.0"}
-MAX_WORKERS = 64          # потоков на карточки
-TIMEOUT = 20
+BASE_URL    = "https://sprint-rowery.pl/rowery?product_list_limit=60"
+HEADERS     = {"User-Agent": "Mozilla/5.0"}
+MAX_WORKERS = 64            # потоков на карточки товара
+TIMEOUT     = 20
 # ─────────────────────
 
 
 def get_soup(url: str) -> BeautifulSoup:
+    """Запрашиваем страницу и возвращаем объект BeautifulSoup."""
     r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
     r.raise_for_status()
     return BeautifulSoup(r.text, "html.parser")
@@ -44,11 +48,14 @@ def parse_tile(tile, page_url: str) -> dict:
 
 # ---------- категория на странице товара ----------
 def fetch_category(url: str) -> str:
+    if not url:
+        return ""
     try:
         soup = get_soup(url)
     except Exception:
         return ""
     crumbs = soup.select("ol.breadcrumbs li a")
+    # пропустим «Start» и сам товар (последний элемент)
     return " > ".join(c.get_text(strip=True) for c in crumbs[1:-1]) if crumbs else ""
 
 
@@ -57,15 +64,17 @@ def parse_page(url: str) -> tuple[list[dict], str | None]:
     print(f"→ {url}")
     soup = get_soup(url)
 
+    # плитки товаров
     items = [parse_tile(t, url) for t in soup.select("div.product-item-info")]
 
     # подтягиваем категории параллельно
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        fut2idx = {pool.submit(fetch_category, it["link"]): i for i, it in enumerate(items) if it["link"]}
+        fut2idx = {pool.submit(fetch_category, it["link"]): i
+                   for i, it in enumerate(items) if it["link"]}
         for fut in as_completed(fut2idx):
             items[fut2idx[fut]]["category"] = fut.result()
 
-    # «дальше»
+    # ссылка «Дальше»
     nxt = soup.select_one("li.pages-item-next > a, a.action.next")
     next_url = urljoin(url, nxt["href"]) if nxt and nxt.has_attr("href") else None
     return items, next_url
@@ -77,7 +86,6 @@ def crawl(start_url: str) -> list[dict]:
     while url:
         page_items, url = parse_page(url)
         all_items.extend(page_items)
-        # без sleep — нужная «пауза» создаётся самими запросами товаров
     return all_items
 
 
@@ -86,11 +94,22 @@ def save(data: list[dict]):
     df = pd.DataFrame(data)
     df.to_csv("sprint_rowery.csv", sep=";", index=False, encoding="utf-8-sig")
     df.to_excel("sprint_rowery.xlsx", index=False)
-    print(f"\n✅ Готово. Сохранено: {len(df)} товаров.")
 
 
+# ---------- запускаем ----------
 if __name__ == "__main__":
     t0 = time.time()
-    dataset = crawl(BASE_URL)
-    save(dataset)
-    print(f"⏱ Время работы: {time.time()-t0:.1f} сек.")
+    collected: list[dict] = []
+
+    try:
+        collected = crawl(BASE_URL)            # основной обход
+    except KeyboardInterrupt:
+        print("\n⏹  Остановлено вручную — сохраняю то, что успел собрать…")
+    finally:
+        if collected:
+            save(collected)
+            print(f"💾 Сохранено {len(collected)} товаров.")
+        else:
+            print("⚠️  Нечего сохранять — список пуст.")
+
+        print(f"⏱  Время работы: {time.time() - t0:.1f} сек.")
