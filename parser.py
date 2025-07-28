@@ -62,7 +62,9 @@ def parse_page(url: str) -> tuple[list[dict], str | None]:
     print(f"→ {url}")
     soup = get_soup(url)
 
-    items = [parse_tile(t, url) for t in soup.select("div.product-item-info")]
+    tiles = soup.select("div.product-item-info")                    # ← 1
+    print("   карточек на странице:", len(tiles))                   # ← 2
+    items = [parse_tile(t, url) for t in tiles]                     # ← 3
 
     # подтягиваем категории параллельно
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
