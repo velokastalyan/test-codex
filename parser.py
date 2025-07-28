@@ -26,6 +26,7 @@ def parse_product_card(card):
             "Ссылка": url,
             "Фото": image
         }
+
     except Exception as e:
         print("Ошибка в карточке товара:", e)
         return None
@@ -33,13 +34,13 @@ def parse_product_card(card):
 def parse_page(url):
     print(f"Парсинг страницы: {url}")
     res = requests.get(url, headers=headers)
-print(f"Статус ответа: {res.status_code}")
+    print(f"Статус ответа: {res.status_code}")
     res.raise_for_status()
-    
+
     # ⬇⬇⬇ Сохраняем HTML для отладки ⬇⬇⬇
     with open("debug.html", "w", encoding="utf-8") as f:
         f.write(res.text)
-    
+
     soup = BeautifulSoup(res.text, "html.parser")
     products = soup.select("div.product-item")
 
