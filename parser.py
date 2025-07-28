@@ -16,10 +16,10 @@ def parse_product_card(card):
         title = card.select_one("h3.product-item__name__heading").text.strip()
         price = card.select_one("div.product-price-final-price").text.strip()
         link_tag = card.select_one("a")
-        url = base_url + link_tag["href"] if link_tag else ""
+        url = base_url + link_tag["href"] if link_tag and link_tag.has_attr("href") else ""
         image_tag = card.select_one("img")
-        image = image_tag["src"] if image_tag and "src" in image_tag.attrs else ""
-        
+        image = image_tag["src"] if image_tag and image_tag.has_attr("src") else ""
+
         return {
             "Название": title,
             "Цена": price,
@@ -34,6 +34,11 @@ def parse_page(url):
     print(f"Парсинг страницы: {url}")
     res = requests.get(url, headers=headers)
     res.raise_for_status()
+    
+    # ⬇⬇⬇ Сохраняем HTML для отладки ⬇⬇⬇
+    with open("debug.html", "w", encoding="utf-8") as f:
+        f.write(res.text)
+    
     soup = BeautifulSoup(res.text, "html.parser")
     products = soup.select("div.product-item")
 
@@ -44,7 +49,7 @@ def parse_page(url):
 
     # Пагинация
     next_link = soup.select_one("a.next")
-    if next_link:
+    if next_link and next_link.has_attr("href"):
         next_url = base_url + next_link["href"]
         parse_page(next_url)
 
