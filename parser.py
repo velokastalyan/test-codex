@@ -2,20 +2,15 @@
 # -*- coding: utf‑8 -*-
 
 """
-Парсер каталога https://sprint‑rowery.pl/rowery
-Собирает: category, title, price, link
+Парсер каталога https://sprint-rowery.pl/rowery
+Собирает:  title, price, link, category
 Сохраняет в sprint_rowery.csv + sprint_rowery.xlsx
 
 Запуск:
     python parser.py
 
-Остановить в любой момент: Ctrl+C — скрипт сохранит то, что уже собрано.
+Остановить в любой момент: Ctrl+C — скрипт сохранит то, что успел собрать.
 """
-
-import locale
-import sys
-locale.setlocale(locale.LC_ALL, '')                 # корректный вывод юникода в macOS / Linux
-sys.stdout.reconfigure(encoding='utf-8')
 
 import time
 import json
@@ -28,8 +23,8 @@ from bs4 import BeautifulSoup
 
 # ─── настройки ────────────────────────────────────────────────────────────────
 BASE_URL   = "https://sprint-rowery.pl/rowery?product_list_limit=60"
-HEADERS    = {"User-Agent": "Mozilla/5.0"}
-MAX_WORKERS = 64                    # потоков на карточки
+HEADERS    = {"User‑Agent": "Mozilla/5.0"}
+MAX_WORKERS = 64          # потоков на карточки
 TIMEOUT     = 20
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -41,20 +36,21 @@ def get_soup(url: str) -> BeautifulSoup:
     return BeautifulSoup(r.text, "html.parser")
 
 
-# ───────── данные из плитки ───────────────────────────────────────────────────
+# ─── данные из плитки ─────────────────────────────────────────────────────────
 def parse_tile(tile, page_url: str) -> dict:
-    title_el = tile.select_one("h3.product-item__name_heading a.product-item-link")
-    price_el = tile.select_one("div.product-price-final-price span.price")
+    title_el = tile.select_one("h3.product-item__name_heading, a.product-item-link")
+    price_el = tile.select_one("div.product-price-final-price, span.price")
     link_el  = tile.select_one("a.product-item-link")
 
     return {
         "title": title_el.get_text(" ", strip=True) if title_el else "",
         "price": price_el.get_text(" ", strip=True) if price_el else "",
-        "link" : urljoin(page_url, link_el["href"]) if link_el and link_el.has_attr("href") else "",
+        "link":  urljoin(page_url, link_el["href"]) if link_el and link_el.has_attr("href") else "",
+        "category": "",             # заполним позже
     }
 
 
-# ───────── категория на странице товара ───────────────────────────────────────
+# ─── категория на странице товара ────────────────────────────────────────────
 def fetch_category(url: str) -> str:
     if not url:
         return ""
@@ -64,32 +60,17 @@ def fetch_category(url: str) -> str:
     except Exception:
         return ""
 
-    for script in soup.find_all("script", type="application/ld+json"):
-        try:
-            data = json.loads(script.string or "")
-        except Exception:
-            continue
-
-        # интересует BreadcrumbList
-        if isinstance(data, dict) and data.get("@type") == "BreadcrumbList":
-            names = [
-                el.get("item", {}).get("name", "")
-                for el in data.get("itemListElement", [])
-                if isinstance(el, dict)
-            ]
-            category = " > ".join(n for n in names if n)
-            return category or ""
-
-    return ""
+    crumbs = soup.select("ol.breadcrumbs li a")[:-1]      # без самого товара
+    return " › ".join(c.get_text(strip=True) for c in crumbs)
 
 
-# ───────── парс одной страницы каталога ───────────────────────────────────────
+# ─── парс одной страницы каталога ─────────────────────────────────────────────
 def parse_page(url: str) -> tuple[list[dict], str | None]:
     print(f"↷  {url}")
     soup = get_soup(url)
 
     tiles = soup.select("div.product-item-info")
-    print(f"   карточек на странице: {len(tiles)}")
+    print("   карточек на странице:", len(tiles))
 
     items = [parse_tile(t, url) for t in tiles]
 
@@ -101,12 +82,12 @@ def parse_page(url: str) -> tuple[list[dict], str | None]:
         for fut in as_completed(fut2idx):
             items[fut2idx[fut]]["category"] = fut.result()
 
-    nxt = soup.select_one("li.pages-item-next > a, a.action.next")
-    next_url = urljoin(url, nxt["href"]) if nxt and nxt.has_attr("href") else None
-    return items, next_url
+    nxt   = soup.select_one("li.pages-item-next > a.action.next")
+    n_url = urljoin(url, nxt["href"]) if nxt and nxt.has_attr("href") else None
+    return items, n_url
 
 
-# ───────── полный обход каталога ──────────────────────────────────────────────
+# ─── полный обход каталога ────────────────────────────────────────────────────
 def crawl(start_url: str) -> list[dict]:
     all_items, url = [], start_url
     while url:
@@ -115,15 +96,14 @@ def crawl(start_url: str) -> list[dict]:
     return all_items
 
 
-# ───────── сохранение ─────────────────────────────────────────────────────────
+# ─── сохранение ───────────────────────────────────────────────────────────────
 def save(data: list[dict]):
-    df = pd.DataFrame(data)
+    df = pd.DataFrame(data)[["title", "price", "link", "category"]]
     df.to_csv("sprint_rowery.csv",  sep=";", index=False, encoding="utf-8-sig")
-    df.to_excel("sprint_rowery.xlsx", index=False)   # требует openpyxl
-    print(f"📗  Сохранено  {len(data)} товаров.")
+    df.to_excel("sprint_rowery.xlsx", index=False)
 
 
-# ───────── точка входа ────────────────────────────────────────────────────────
+# ─── точка входа ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     t0 = time.time()
     collected: list[dict] = []
@@ -131,11 +111,12 @@ if __name__ == "__main__":
     try:
         collected = crawl(BASE_URL)
     except KeyboardInterrupt:
-        print("\n⏹  Остановлено вручную – сохраняю то, что успел собрать…")
+        print("\n■  Остановлено вручную — сохраняю то, что успел собрать…")
     finally:
         if collected:
             save(collected)
+            print(f"✅  Сохранено  {len(collected)}  товаров.")
         else:
-            print("⚠️  Нечего сохранять – список пуст.")
+            print("⚠️  Нечего сохранять — список пуст.")
 
-    print(f"⏱  Время работы: {time.time() - t0:.1f} сек.")
+        print(f"⏱️  Время работы: {time.time() - t0:.1f} сек.")
