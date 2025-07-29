@@ -109,7 +109,7 @@ def save(data: list[dict]):
     df.to_csv("sprint_rowery.csv", sep=";", index=False, encoding="utf-8-sig")
 
     # Excel‑файл с отметкой времени, чтобы не затирать предыдущие выгрузки
-    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    stamp = datetime.now().strftime("%d. %m. %Y %H-%M")
     df.to_excel(f"sprint_rowery_{stamp}.xlsx", index=False)   # требует openpyxl
 
 
