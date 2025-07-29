@@ -23,7 +23,7 @@ from bs4 import BeautifulSoup
 
 # ─── настройки ────────────────────────────────────────────────────────────────
 BASE_URL   = "https://sprint-rowery.pl/rowery?product_list_limit=60"
-HEADERS    = {"User‑Agent": "Mozilla/5.0"}
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 MAX_WORKERS = 64      # потоков на карточки
 TIMEOUT     = 20
 # ───────────────────────────────────────────────────────────────────────────────
