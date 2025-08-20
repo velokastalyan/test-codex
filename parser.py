@@ -1,160 +1,260 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
 """
-Парсер https://sprint-rowery.pl/rowery
-Собирает title, price, link, category — только товары «в наличии».
-Вывод: sprint_rowery_<dd.MM.yyyy HH-mm>.csv / .xlsx
+Sprint-Rowery scraper with JS rendering + полная диагностика.
+Требования (в активированном venv):
+    pip install requests-html lxml lxml_html_clean pandas openpyxl
+Запуск:
+    python parser.py
+Результат:
+    raw_page.html, rendered_page.html, debug_page_*.html, debug_product_*.html
+    output.csv, output.xlsx
 """
 
-from __future__ import annotations
-
-import json
+import os
+import re
 import time
-from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urljoin
+from dataclasses import dataclass, asdict
+from typing import List, Optional, Tuple
+from urllib.parse import urljoin, urlparse
 
 import pandas as pd
-import requests
-from bs4 import BeautifulSoup
+from requests_html import HTMLSession
 
-# ───────── настройки ─────────
-BASE_URL    = "https://sprint-rowery.pl/rowery?product_list_limit=60"
-HEADERS     = {"User-Agent": "Mozilla/5.0"}
-MAX_WORKERS = 64      # потоков на карточки
-TIMEOUT     = 20
-# ────────────────────────────
+BASE_URL = "https://sprint-rowery.pl"
+START_PATH = "/rowery"                 # корневая категория
+RENDER_TIMEOUT = 30
+RETRIES = 3
+SLEEP = 1.0
+SAVE_DEBUG = True
+MAX_PAGES = 0                          # 0 = без лимита (если нужно ограничить, поставьте число)
 
+HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/124.0.0.0 Safari/537.36"),
+    "Accept-Language": "pl,en;q=0.9,ru;q=0.8",
+}
 
-def get_soup(url: str) -> BeautifulSoup:
-    r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-    r.raise_for_status()
-    return BeautifulSoup(r.text, "html.parser")
-
-
-def parse_tile(tile: BeautifulSoup, page_url: str) -> dict:
-    title_el = tile.select_one("h3.product-item__name_heading, a.product-item-link")
-    price_el = tile.select_one("div.product-price-final-price, span.price")
-    link_el  = tile.select_one("a.product-item-link")
-
-    return {
-        "title": title_el.get_text(" ", strip=True) if title_el else "",
-        "price": price_el.get_text(" ", strip=True) if price_el else "",
-        "link" : urljoin(page_url, link_el["href"]) if link_el and link_el.has_attr("href") else "",
-    }
+@dataclass
+class Product:
+    title: str
+    price: str
+    link: str
+    image: str
+    category: str
+    description: str
 
 
-def fetch_category_availability(url: str) -> tuple[str | None, bool]:
-    """Возвращает (category, in_stock) для товара."""
-    if not url:
-        return None, False
+# ---------- утилиты ----------
+def abs_url(href: str) -> str:
+    return href if href.startswith("http") else urljoin(BASE_URL, href)
 
-    try:
-        soup = get_soup(url)
-    except Exception:
-        return None, False
+def norm(text: Optional[str]) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
 
-    # ─── категория из крошек ───
-    crumbs = (
-        soup.select("ol.breadcrumbs li a")
-        or soup.select("ul.breadcrumbs li a")
-        or soup.select("div.breadcrumbs a")
-    )
-    category: str | None = None
-    if len(crumbs) >= 2:
-        category = crumbs[-2].get_text(strip=True)
-    else:
-        for a in reversed(crumbs):
-            if "/rowery/" in a.get("href", ""):
-                category = a.get_text(strip=True)
-                break
+def is_product_link(href: str) -> bool:
+    if not href or href.startswith(("#", "mailto:", "tel:")):
+        return False
+    path = urlparse(href).path.lower()
+    return any(k in path for k in ("/rower", "/produkt", "/product"))
 
-    # ─── наличие из JSON‑LD ───
-    in_stock = False
-    for script in soup.find_all("script", type="application/ld+json"):
+def save_file(name: str, data: str):
+    with open(name, "w", encoding="utf-8") as f:
+        f.write(data)
+    print(f"[SAVE] {os.path.abspath(name)}")
+
+def session() -> HTMLSession:
+    s = HTMLSession()
+    s.headers.update(HEADERS)
+    return s
+
+def render(url: str):
+    s = session()
+    last_err = None
+    for attempt in range(1, RETRIES + 1):
         try:
-            data = json.loads(script.string)
-        except Exception:
-            continue
+            r = s.get(url, timeout=30)
+            # сохраняем сырой HTML первой страницы для диагностики
+            if "page=1" in url or url.endswith(START_PATH) or url.endswith(START_PATH + "/"):
+                save_file("raw_page.html", r.text)
 
-        objects = data if isinstance(data, list) else [data]
-        for obj in objects:
-            if isinstance(obj, dict) and obj.get("@type") == "Product":
-                offers = obj.get("offers", {})
-                if isinstance(offers, list):
-                    offers = offers[0] if offers else {}
-                if isinstance(offers, dict):
-                    availability = offers.get("availability", "")
-                    if "InStock" in availability:
-                        in_stock = True
-                        break
-        if in_stock:
+            r.html.render(timeout=RENDER_TIMEOUT, sleep=1.0, reload=False, keep_page=True)
+            html = r.html.html or ""
+            if "page=1" in url or url.endswith(START_PATH) or url.endswith(START_PATH + "/"):
+                save_file("rendered_page.html", html)
+
+            if r.status_code == 200 and html:
+                return r
+        except Exception as e:
+            last_err = e
+            time.sleep(1.2 * attempt)
+    print(f"[FAIL] render {url} -> {last_err}")
+    return None
+
+
+# ---------- парсинг листинга ----------
+LIST_SELECTORS = [
+    ".product-miniature",
+    "article.product",
+    "li.product",
+    "div.product",
+    "div.js-product",
+    "[data-id-product]",
+]
+
+def parse_list(url: str, page_idx: int) -> Tuple[List[str], Optional[str]]:
+    r = render(url)
+    if not r:
+        return [], None
+
+    html = r.html.html or ""
+    if SAVE_DEBUG:
+        save_file(f"debug_page_{page_idx}.html", html)
+
+    links: List[str] = []
+    # 1) пробуем типовые селекторы карточек
+    for sel in LIST_SELECTORS:
+        cards = r.html.find(sel)
+        if not cards:
+            continue
+        for c in cards:
+            a = c.find("a[href]", first=True)
+            if not a:
+                continue
+            href = abs_url(a.attrs.get("href", ""))
+            if href and is_product_link(href) and href not in links:
+                links.append(href)
+        if links:
             break
 
-    return category, in_stock
+    # 2) план Б: берем все ссылки на странице и фильтруем эвристикой
+    if not links:
+        for a in r.html.find("a[href]"):
+            href = abs_url(a.attrs.get("href", ""))
+            if href and is_product_link(href) and href not in links:
+                links.append(href)
+
+    # пагинация
+    next_el = r.html.find('a[rel="next"]', first=True) or r.html.find(".pagination-next a, .next a", first=True)
+    next_url = abs_url(next_el.attrs["href"]) if next_el and next_el.attrs.get("href") else None
+
+    print(f"[LIST] page {page_idx}: links={len(links)} next={'yes' if next_url else 'no'}")
+    return links, next_url
 
 
-def parse_page(url: str) -> tuple[list[dict], str | None]:
-    print(f"[+] обрабатываем: {url}", end="  | ")
-    soup = get_soup(url)
+# ---------- парсинг товара ----------
+def parse_product(url: str, idx: int) -> Optional[Product]:
+    r = render(url)
+    if not r:
+        return None
 
-    tiles = soup.select("div.product-item-info")
-    print(f"карточек на странице: {len(tiles)}")
+    if SAVE_DEBUG and idx <= 5:
+        save_file(f"debug_product_{idx}.html", r.html.html or "")
 
-    items = [parse_tile(t, url) for t in tiles]
+    title_el = (r.html.find("h1.product-name", first=True)
+                or r.html.find("h1[itemprop='name']", first=True)
+                or r.html.find("h1", first=True))
+    title = norm(title_el.text if title_el else "")
 
-    # подтягиваем категорию и наличие параллельно
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        fut2idx = {pool.submit(fetch_category_availability, it["link"]): i
-                   for i, it in enumerate(items) if it["link"]}
-        for fut in as_completed(fut2idx):
-            cat, stock = fut.result()
-            idx = fut2idx[fut]
-            items[idx]["category"]  = cat or ""
-            items[idx]["in_stock"]  = stock
+    price_el = (r.html.find(".current-price", first=True)
+                or r.html.find(".product-prices .price", first=True)
+                or r.html.find("span[itemprop='price']", first=True)
+                or r.html.find(".price", first=True))
+    price = norm(price_el.text if price_el else "")
 
-    # фильтруем «в наличии»
-    items_in_stock = [it for it in items if it.get("in_stock")]
-    for it in items_in_stock:
-        it.pop("in_stock", None)
+    img_el = (r.html.find("img.js-qv-product-cover", first=True)
+              or r.html.find(".product-cover img", first=True)
+              or r.html.find("img[itemprop='image']", first=True)
+              or r.html.find('meta[property="og:image"]', first=True))
+    image = ""
+    if img_el:
+        image = img_el.attrs.get("src") or img_el.attrs.get("content") or img_el.attrs.get("data-src") or ""
+        image = abs_url(image)
 
-    nxt = soup.select_one("li.pages-item-next > a, a.action.next")
-    next_url = urljoin(url, nxt["href"]) if nxt and nxt.has_attr("href") else None
-    return items_in_stock, next_url
+    crumbs = r.html.find(".breadcrumbs a, ol.breadcrumbs a, ul.breadcrumbs a, nav.breadcrumb a")
+    category = ""
+    if crumbs:
+        category = norm(crumbs[-2].text if len(crumbs) >= 2 else crumbs[-1].text)
+
+    desc_el = r.html.find("#description, .product-description, [itemprop='description']", first=True)
+    description = norm(desc_el.text if desc_el else "")
+
+    # fallback из JSON‑LD
+    if not title or not price:
+        for sc in r.html.find('script[type="application/ld+json"]'):
+            try:
+                import json
+                data = json.loads(sc.text)
+                if isinstance(data, list) and data:
+                    data = data[0]
+                if isinstance(data, dict) and data.get("@type") in ("Product", "Bike", "Thing"):
+                    title = title or norm(data.get("name") or "")
+                    offers = data.get("offers")
+                    if isinstance(offers, list) and offers:
+                        offers = offers[0]
+                    if isinstance(offers, dict):
+                        price = price or str(offers.get("price", "")).strip()
+            except Exception:
+                pass
+
+    if not title:
+        print(f"[WARN] skip (no title): {url}")
+        return None
+
+    return Product(title=title, price=price, link=url, image=image, category=category, description=description)
 
 
-def crawl(start_url: str) -> list[dict]:
-    all_items, url = [], start_url
-    while url:
-        page_items, url = parse_page(url)
-        all_items.extend(page_items)
-    return all_items
+# ---------- обход ----------
+def crawl() -> List[Product]:
+    items: List[Product] = []
+    seen = set()
+
+    page = 1
+    page_url = abs_url(f"{START_PATH}?page={page}")
+
+    while page_url:
+        print(f"[PAGE] {page_url}")
+        links, next_url = parse_list(page_url, page)
+
+        if not links:
+            print("[INFO] Товары не найдены на странице — завершаю.")
+            break
+
+        new_links = [u for u in links if u not in seen]
+        for u in new_links:
+            seen.add(u)
+
+        print(f"[INFO] к обработке: {len(new_links)}")
+        for i, link in enumerate(new_links, 1):
+            print(f"  [{i}/{len(new_links)}] {link}")
+            prod = parse_product(link, idx=i)
+            if prod:
+                items.append(prod)
+            time.sleep(SLEEP)
+
+        if MAX_PAGES and page >= MAX_PAGES:
+            print("[INFO] Достигнут лимит страниц.")
+            break
+
+        page += 1
+        page_url = next_url
+        time.sleep(SLEEP)
+
+    return items
 
 
-def save(data: list[dict]) -> None:
-    df = pd.DataFrame(data)
-    stamp = datetime.now().strftime("%d.%m.%Y %H-%M")
-    csv_name  = f"sprint_rowery_{stamp}.csv"
-    xlsx_name = f"sprint_rowery_{stamp}.xlsx"
-
-    df.to_csv(csv_name,  sep=";", index=False, encoding="utf-8-sig")
-    df.to_excel(xlsx_name, index=False)
-    print(f"✅  Сохранено {len(df)} товаров в {csv_name}/{xlsx_name}")
+def main():
+    t0 = time.time()
+    products = crawl()
+    if products:
+        df = pd.DataFrame([asdict(p) for p in products])
+        df.to_csv("output.csv", index=False)
+        df.to_excel("output.xlsx", index=False)
+        print(f"[OK] Сохранено {len(df)} товаров -> output.csv, output.xlsx")
+    else:
+        print("Пусто — сохранять нечего.")
+    print(f"⏱ За {time.time() - t0:.1f} сек.")
 
 
 if __name__ == "__main__":
-    t0 = time.time()
-    collected: list[dict] = []
-
-    try:
-        collected = crawl(BASE_URL)
-    except KeyboardInterrupt:
-        print("\n⚠️ Остановлено вручную — сохраняю то, что успел собрать…")
-    finally:
-        if collected:
-            save(collected)
-        else:
-            print("⚠️ Нечего сохранять — список пуст.")
-
-        print(f"⏱️ Время работы: {time.time() - t0:.1f} сек.")
+    main()
